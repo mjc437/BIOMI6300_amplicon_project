@@ -1,0 +1,95 @@
+---
+title: "01_DADA2"
+author: "Maya Craig"
+date: "`r Sys.Date()`"
+output: html_document:
+  code_folding: show
+    theme: spacelab
+    highlight: pygments
+    keep_md: no
+    toc: yes
+    toc_float:
+      collapsed: no
+      smooth_scroll: yes
+      toc_depth: 3
+  keep_md: true  
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      fig.align = "center",
+                      fig.path = "../figures/01_DADA2/") # send any figure output to this folder
+```
+
+
+## Set seed 
+```{r}
+set.seed(4750)
+```
+
+
+```{r}
+# What time did we start running this script? 
+start_time <- Sys.time()
+start_time
+```
+
+# Goals of this file 
+
+1. Use raw fastq files and generate quality plots to assess quality of reads.
+2. Filter and trim out bad sequences and bases from our sequencing files. 
+3. Write out fastq files with high quality sequences. 
+4. Evaluate the quality from our filter and trim. 
+5. Infer Errors on forward and reverse reads individually.
+6. Identified ASVs on forward and reverse reads separately, using the error model.  
+7. Merge forward and reverse ASVs into "contiguous ASVs".  
+8. Generate the ASV count table. (`otu_table` input for phyloseq.). 
+
+
+# Load packages 
+```{r}
+# Efficient package loading with pacman 
+pacman::p_load(tidyverse, BiocManager, devtools, dada2, 
+               phyloseq, patchwork, DT, iNEXT, vegan,
+               install = FALSE)
+```
+
+
+# Load data 
+```{r}
+# Set the raw fastq path to the raw sequencing files 
+# Path to the fastq files 
+raw_fastqs_path <- "data/01_raw_gzipped_fastqs"
+raw_fastqs_path
+head(list.files(raw_fastqs_path))
+str(list.files(raw_fastqs_path)) #how many files 
+```
+
+# Create vector of forward reads 
+```{r}
+forward_reads <- list.files(raw_fastqs_path, pattern = "_1.fastq.gz", full.names = TRUE)  
+head(forward_reads)  
+```
+
+# Create vector of reverse reads
+```{r}
+reverse_reads <- list.files(raw_fastqs_path, pattern = "_2.fastq.gz", full.names = TRUE)  
+head(reverse_reads)  
+```
+
+# Asses Read Quality 
+
+# Evaluate raw read sequence quality 
+
+- Examining the quality of reads before trimming 
+
+```{r}
+# Randomly select 12 samples from dataset to evaluate 
+random_samples <- sample(1:length(reverse_reads), size = 12)
+random_samples
+
+# Calculate and plot quality of these two samples
+forward_filteredQual_plot_12 <- plotQualityProfile(forward_reads[random_samples]) + 
+  labs(title = "Forward Read: Raw Quality")
+```
+
