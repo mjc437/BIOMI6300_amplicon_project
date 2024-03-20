@@ -89,7 +89,7 @@ colnames(metadata_df)
 
 # A little data clean up of the metadata file
 
-metadata_df$names <- substring(metadata_df$X.Run, 1) # remove the first two characters in the X.run column so that it exactly matches the track_count_df names column 
+metadata_df$names <- substring(metadata_df$X.Run, 2) # remove the first two characters in the X.run column so that it exactly matches the track_count_df names column 
 
 # Merge metadata_df with track_reads_df 
 head(metadata_df)
