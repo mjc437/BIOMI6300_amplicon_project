@@ -144,7 +144,7 @@ Parameters of filter and trim **DEPEND ON THE DATASET**.
 filtered_reads <- 
   filterAndTrim(fwd = forward_reads, filt = filtered_forward_reads,
               rev = reverse_reads, filt.rev = filtered_reverse_reads, truncLen=c(250,225),
-              maxN = 0, maxEE = c(2,2), trimLeft = 0,
+              maxN = 0, maxEE = c(2,2), trimLeft = c(19,20),
               truncQ = 2, rm.phix = TRUE, compress = TRUE, multithread = TRUE)
 head(filtered_reads)
 ```
@@ -206,7 +206,7 @@ preQC_aggregate_plot / postQC_aggregate_plot
 1. Starts with the assumption that the error rates are the maximum (takes the most abundant sequence ("center") and assumes it's the only sequence not caused by errors).  
 2. Compares the other sequences to the most abundant sequence. 
 3. Uses at most 10^8^ nucleotides for the error estimation.  
-4. Uses parametric error estimation function of loess fit on the observed error rates
+4. Uses parametric error estimation function of loses fit on the observed error rates
 
 ```{r learn-errors}
 # Forward reads 
@@ -238,7 +238,7 @@ dada_forward <- dada(filtered_forward_reads,
 
 typeof(dada_forward)
 # Grab a sample and look at it 
-dada_forward$`20211005-MA-CWS1P_R1_filtered.fastq.gz`
+dada_forward$SRR23008984_1_filtered.fastq.gz
 
 
 # Infer ASVs on the reverse sequences 
@@ -265,7 +265,7 @@ length(merged_ASVs)
 names(merged_ASVs)
 
 # Inspect the merger data.frame from the 20211005-MA-CWS1P 
-head(merged_ASVs[[1]])
+head(merged_ASVs[[2]])
 ```
 
 # Create RAW ASV count table 
@@ -300,7 +300,7 @@ raw_ASV_table <- makeSequenceTable(merged_ASVs)
 # TRIM THE ASVS
 
 # We will allow for a few 
-raw_ASV_table_trimmed <- raw_ASV_table[,nchar(colnames(raw_ASV_table))  %in% 250:256]
+raw_ASV_table_trimmed <- raw_ASV_table[,nchar(colnames(raw_ASV_table))  %in% 264:265]
 
 # Inspect the distribution of sequence lengths of all ASVs in dataset 
 table(nchar(getSequences(raw_ASV_table_trimmed)))
@@ -344,7 +344,6 @@ data.frame(Seq_Length_NoChim = nchar(getSequences(noChimeras_ASV_table))) %>%
   ggplot(aes(x = Seq_Length_NoChim )) + 
   geom_histogram()+ 
   labs(title = "Trimmed + Chimera Removal distribution of ASV length")
-# Note the difference in the peak at 249, which is now BELOW 3000
 ```
 
 # Track read counts 

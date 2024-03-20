@@ -72,6 +72,7 @@ tax_mat <-
   as.matrix()
 ```
 
+
 ##  Track Reads Data
 ```{r load-track-reads}
 load("data/01_DADA2/track_read_counts.RData")
@@ -82,11 +83,13 @@ dim(track_counts_df)
 
 
 # Load in metadata
-rm(metadata_df)
-metadata_df <- read.csv("data/metadata.csv")
+metadata_df <- read.csv("data/amplicon_proj_metadata.csv")
 dim(metadata_df)
 colnames(metadata_df)
 
+# A little data clean up of the metadata file
+
+metadata_df$names <- substring(metadata_df$X.Run, 1) # remove the first two characters in the X.run column so that it exactly matches the track_count_df names column 
 
 # Merge metadata_df with track_reads_df 
 head(metadata_df)
@@ -94,8 +97,7 @@ head(track_counts_df)
 
 metadata_track_reads_df <- 
   metadata_df %>%
-  left_join(., track_counts_df, by = "names") %>%
-  dplyr::select(-X)
+  left_join(., track_counts_df, by = "names")
 
 # Intuition check 
 head(metadata_track_reads_df)
@@ -109,4 +111,70 @@ row.names(metadata_track_reads_df) <- metadata_track_reads_df$names
 row.names(metadata_track_reads_df)
 # intuition check
 head(metadata_track_reads_df)
+```
+
+
+```{r}
+# double check it's all good 
+dim(asv_tab)
+dim(tax_mat)
+
+# Intuition check 
+stopifnot(row.names(asv_tab) == row.names(tax_mat))
+
+# Construct the phyloseq object 
+raw_physeq <- phyloseq(otu_table(asv_tab, taxa_are_rows = TRUE),
+                       sample_data(metadata_track_reads_df),
+                       tax_table(tax_mat))
+raw_physeq
+
+# Save this raw phyloseq object 
+save(raw_physeq, file = "data/02_PreProcessing/raw_physeq.RData")
+```
+
+
+# Cleaning up 
+- Need to remove chloroplasts and mitochondria from the data
+```{r}
+# Remind myself of tax table 
+#View(tax_mat)
+
+# Make new physeq without chloroplasts
+noChloros_physeq <- 
+  raw_physeq %>% 
+  # rm chloroplasts
+  subset_taxa(Order != "Chloroplast" | is.na(Order))
+  
+# How many taxa were chloroplasts? 
+num_chloro_ASVs <- ntaxa(raw_physeq) - ntaxa(noChloros_physeq)
+num_chloro_ASVs
+
+# Intuition chek 
+#noChloros_physeq %>%
+#  tax_table() %>%
+#  data.frame() %>%
+#  View()
+
+# remove mitochondria 
+noChlorosMitos_physeq <- 
+  noChloros_physeq %>%
+  subset_taxa(Family != "Mitochondria" | is.na(Family))
+
+# How many mitochondrial ASVs? 
+num_mito_ASVs <- ntaxa(noChloros_physeq) - ntaxa(noChlorosMitos_physeq)
+num_mito_ASVs
+
+noChlorosMitos_physeq
+
+# How many total asvs were removed from chloros and mitos 
+ntaxa(raw_physeq) - ntaxa(noChlorosMitos_physeq)
+# proportion of asvs kept? 
+ntaxa(noChlorosMitos_physeq)/ntaxa(raw_physeq)
+```
+
+
+# Session Information 
+```{r session-info}
+# Ensure reproducibility 
+devtools::session_info()
 ```
