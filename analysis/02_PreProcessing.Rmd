@@ -1,0 +1,238 @@
+---
+title: "Phyloseq PreProcessing"
+author: "Maya Craig"
+date: "2024-03-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      fig.align = "center",
+                      fig.path = "../figures/02_PreProcessing/") # send any figure output to this folder 
+```
+
+# Load packages
+```{r load packages}
+library(devtools)
+#devtools::install_github("joey711/phyloseq")
+library(phyloseq)
+library(tidyverse)
+```
+
+# Goals
+
+Here, we will process the data into a phyloseq object. 
+
+- ASV table 
+- Taxonomy Table 
+- Track Reads (metadata)
+
+Then, we will remove the following: 
+
+1. Remove Chloroplasts
+2. Remove Mitochondria. 
+3. Remove samples without "enough" reads. 
+
+Finally, write data file of phyloseq output.
+
+# Load Data
+
+## ASV table
+```{r}
+# First, load asv table
+load("data/01_DADA2/ASV_counts.RData")
+
+# Inspect asv_tab
+head(asv_tab)[,1:5]
+
+# Fix names 
+sample_names <- colnames(asv_tab)
+samples_fixed <- sapply(strsplit(basename(sample_names), "_"), `[`,1) 
+head(samples_fixed)
+
+# re-write the ASV count file to fix names 
+colnames(asv_tab) <- samples_fixed
+str(asv_tab)
+```
+
+##  Taxonomy Table
+```{r load-tax-table}
+tax_df <- read.table("data/01_DADA2/ASV_taxonomy.tsv", sep = "\t", skip = 1)
+head(tax_df)
+
+# fix column names 
+colnames(tax_df) <- c("asv_names", "Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species", "ASV", "ASVseq")
+
+head(tax_df)
+
+# Taxonomy Table Matrix
+tax_mat <- 
+  tax_df %>%
+  tibble::column_to_rownames(., var = "asv_names") %>%
+  as.matrix()
+```
+
+
+##  Track Reads Data
+```{r load-track-reads}
+load("data/01_DADA2/track_read_counts.RData")
+
+# Take a look at the data
+head(track_counts_df)
+dim(track_counts_df)
+
+
+# Load in metadata
+metadata_df <- read.csv("data/amplicon_proj_metadata.csv")
+
+#make new columns to label healthy dogs and the breeds
+metadata_df$health <- ifelse(metadata_df$type == "l-control"| metadata_df$type == "p-control", "healthy", "diarrhea")
+metadata_df$breed <- ifelse(metadata_df$type == "l-control"| metadata_df$type == "l-diarrhea", "laborador", "poodle")
+dim(metadata_df)
+colnames(metadata_df)
+
+#save new metadata file
+#write_csv(metadata_df, "data/updated_metadata_df.csv")
+
+# A little data clean up of the metadata file
+
+metadata_df$names <- substring(metadata_df$X.Run, 2) # remove the first two characters in the X.run column so that it exactly matches the track_count_df names column 
+
+# Merge metadata_df with track_reads_df 
+head(metadata_df)
+head(track_counts_df)
+
+metadata_track_reads_df <- 
+  metadata_df %>%
+  left_join(., track_counts_df, by = "names")
+
+# Intuition check 
+head(metadata_track_reads_df)
+
+# Update row.names to be sample names 
+## Before 
+row.names(metadata_track_reads_df)
+# Rewrite 
+row.names(metadata_track_reads_df) <- metadata_track_reads_df$names
+# Check afterwards that it worked 
+row.names(metadata_track_reads_df)
+# intuition check
+head(metadata_track_reads_df)
+```
+
+
+```{r}
+# double check it's all good 
+dim(asv_tab)
+dim(tax_mat)
+
+# Intuition check 
+stopifnot(row.names(asv_tab) == row.names(tax_mat))
+
+# Construct the phyloseq object 
+raw_physeq <- phyloseq(otu_table(asv_tab, taxa_are_rows = TRUE),
+                       sample_data(metadata_track_reads_df),
+                       tax_table(tax_mat))
+raw_physeq
+
+# Save this raw phyloseq object 
+save(raw_physeq, file = "data/02_PreProcessing/raw_physeq.RData")
+```
+
+
+# Cleaning up 
+- Need to remove chloroplasts and mitochondria from the data
+```{r}
+# Remind myself of tax table 
+#View(tax_mat)
+
+# Make new physeq without chloroplasts
+noChloros_physeq <- 
+  raw_physeq %>% 
+  # rm chloroplasts
+  subset_taxa(Order != "Chloroplast" | is.na(Order))
+  
+# How many taxa were chloroplasts? 
+num_chloro_ASVs <- ntaxa(raw_physeq) - ntaxa(noChloros_physeq)
+num_chloro_ASVs
+
+# Intuition chek 
+#noChloros_physeq %>%
+#  tax_table() %>%
+#  data.frame() %>%
+#  View()
+
+# remove mitochondria 
+noChlorosMitos_physeq <- 
+  noChloros_physeq %>%
+  subset_taxa(Family != "Mitochondria" | is.na(Family))
+
+# How many mitochondrial ASVs? 
+num_mito_ASVs <- ntaxa(noChloros_physeq) - ntaxa(noChlorosMitos_physeq)
+num_mito_ASVs
+
+noChlorosMitos_physeq
+
+# How many total asvs were removed from chloros and mitos 
+ntaxa(raw_physeq) - ntaxa(noChlorosMitos_physeq)
+# proportion of asvs kept? 
+ntaxa(noChlorosMitos_physeq)/ntaxa(raw_physeq)
+```
+
+```{r seq-depth}
+# The current data objec
+noChlorosMitos_physeq
+
+# What is the library size/sequencing depth for each sample? 
+seqSums_df <- 
+  noChlorosMitos_physeq %>%
+  otu_table() %>%
+  # Sum each sample column 
+  colSums() %>%
+  data.frame() %>%
+  rownames_to_column(var = "names") %>%
+  left_join(., metadata_track_reads_df, by = "names") 
+
+# Rename second column 
+colnames(seqSums_df)[2] <- "TotalSeqs"
+
+# check
+dim(seqSums_df)
+head(seqSums_df)
+
+# Show the depth of samples 
+seqSums_df %>%
+  dplyr::select(names, TotalSeqs) %>%
+  arrange(TotalSeqs) %>%
+  head()
+
+# plot it! 
+seqSums_df %>%
+  ggplot(aes(x=reorder(names, TotalSeqs), y = TotalSeqs,
+             fill = type)) + 
+  geom_bar(stat = "identity") 
+
+# Density plot 
+seqSums_df %>%
+  ggplot(aes(TotalSeqs, fill = type)) +
+  geom_density(alpha = 0.5)
+```
+- It looks like all samples have a sequencing depth of at least 55,000. Additionally, there seems to be no association between sample type and sequencing, which is good for this analysis.
+
+# Are there samples with few reads? 
+
+```{r rm-samps}
+# What's the min seq depth? 
+min(sample_sums(noChlorosMitos_physeq))
+```
+- It looks like all of the samples have high sequencing depth, so no samples will be removed. 
+
+# Document conclusions 
+- In this document, I was able to process the ASV taxonomy tables, remove mitochondria and chloroplats, and evaluate sequencing. After processing, the minimum sequencing depth is 53,158.
+
+
+# Session Information 
+```{r session-info}
+# Ensure reproducibility 
+devtools::session_info()
+```

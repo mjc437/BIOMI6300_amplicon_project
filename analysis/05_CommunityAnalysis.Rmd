@@ -1,0 +1,868 @@
+---
+title: "Between Sample (Beta) Diversity"
+author: "Maya Craig"
+date: "`r Sys.Date()`"
+output:
+  html_document: 
+    code_folding: show
+    theme: spacelab
+    highlight: pygments
+    keep_md: no
+    toc: yes
+    toc_float:
+      collapsed: no
+      smooth_scroll: yes
+      toc_depth: 3
+  keep_md: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      fig.path = "../figures/05_CommunityAnalysis/")
+```
+
+# Goals 
+
+1. Load in phyloseq data with rooted tree.  
+2. Evaluate sequencing depth and remove sample.  
+3. Normalize the read counts between samples.  
+4. Calculate community dissimilarities. Numbers between 0 and 1. If 0, completely similar versus if they are 1, then they're completely dissimilar.   
+    a. **Sorensen**: Shared Species as a binary value: Abundance-unweighted 
+    b. **Bray-Curtis**: Shared Abundant species: Abundance-weighted
+    c. **(Abundance-)Weighted UNIFRAC**: Consider Abundant Species and where they fall on the tree  
+5. Visualize the community data with two unconstrained Ordinations:  
+    a. **PCoA**: Linear Method. Eigenvalue = how much variation is explained by each axis. Choose to view axis 1, 2, 3, etc. and plot them together.  
+    b. **NMDS**: Non-linear. Smush multiple Dimensions into 2 or 3 axes. Need to report Stress value (ideally <0.15).  
+6. Run statistics with PERMANOVA and betadispR. 
+
+
+# Setup 
+
+## Set the seed 
+```{r set-seed}
+set.seed(98572)
+```
+
+
+## Load Libraries
+```{r load-libraries}
+#install.packages("vegan")
+pacman::p_load(tidyverse, devtools, phyloseq, patchwork, vegan,
+               install = FALSE)
+
+# set colors 
+all_samples_colors <- c(
+  "p-diarrhea" = "deeppink",
+  "p-control" = "royalblue1",
+  "l-control" = "goldenrod1",
+  "l-diarrhea" = "springgreen")
+
+poodle_colors <- c("p-diarrhea" = "deeppink", 
+                  "p-control" = "springgreen")
+
+laborador_colors <- c("l-diarrhea" = "deeppink", 
+                  "l-control" = "springgreen")
+
+health_colors <- c("p-control" = "deeppink",
+                   "l-control" = "springgreen")
+
+```
+
+
+## Load Data 
+```{r load-physeq}
+# Load in rooted phylogenetic tree! 
+load("data/03_Phylogenetic_Tree/phytree_preprocessed_physeq.RData")
+unrooted_physeq_rmASVs
+```
+
+# Explore Read Counts 
+
+## Raw read depth 
+```{r calc-seq-depth}
+# Calculate the total number of reads per sample. 
+raw_TotalSeqs_df  <- 
+  midroot_physeq_rmASVs %>%
+  # calculate the sample read sums 
+  sample_sums() %>%
+  data.frame()
+# name the column 
+colnames(raw_TotalSeqs_df)[1] <- "TotalSeqs"
+  
+head(raw_TotalSeqs_df)
+
+# make histogram of raw reads 
+raw_TotalSeqs_df %>%
+  ggplot(aes(x = TotalSeqs)) + 
+  geom_histogram(bins = 50) + 
+  scale_x_continuous(limits = c(0, 100000)) + 
+  labs(title = "Raw Sequencing Depth Distribution") + 
+  theme_classic()
+```
+- The read counts vary between ~55,000 - 75,000. There are two samples in particular that have lower read counrs than the rest of the samples
+
+## Normalize read counts  
+```{r scale-reads}
+### scale_reads function
+#################################################################################### 
+# Function to scale reads: http://deneflab.github.io/MicrobeMiseq/ 
+# Scales reads by 
+# 1) taking proportions
+# 2) multiplying by a given library size of n
+# 3) rounding 
+# Default for n is the minimum sample size in your library
+# Default for round is floor
+
+matround <- function(x){trunc(x+0.5)}
+
+scale_reads <- function(physeq, n = min(sample_sums(physeq)), round = "round") {
+  
+  # transform counts to n
+  physeq.scale <- transform_sample_counts(physeq, function(x) {(n * x/sum(x))})
+  
+  # Pick the rounding functions
+  if (round == "floor"){
+    otu_table(physeq.scale) <- floor(otu_table(physeq.scale))
+  } else if (round == "round"){
+    otu_table(physeq.scale) <- round(otu_table(physeq.scale))
+  } else if (round == "matround"){
+    otu_table(physeq.scale) <- matround(otu_table(physeq.scale))
+  }
+  
+  # Prune taxa and return new phyloseq object
+  physeq.scale <- prune_taxa(taxa_sums(physeq.scale) > 0, physeq.scale)
+  return(physeq.scale)
+}
+```
+
+
+## Scale the reads and check the distribution of the seq depth 
+
+```{r scale-physeq}
+min(sample_sums(midroot_physeq_rmASVs))
+
+# Scale reads by the above function
+scaled_rooted_physeq <- 
+  midroot_physeq_rmASVs %>%
+  scale_reads(round = "matround")
+
+# Calculate the read depth 
+scaled_TotalSeqs_df <- 
+  scaled_rooted_physeq %>%
+  sample_sums() %>%
+  data.frame()
+colnames(scaled_TotalSeqs_df)[1] <-"TotalSeqs"
+
+# Inspect
+head(scaled_TotalSeqs_df)
+
+# Check the range of the data 
+min_seqs <- min(scaled_TotalSeqs_df$TotalSeqs); min_seqs
+max_seqs <- max(scaled_TotalSeqs_df$TotalSeqs); max_seqs
+# range
+max_seqs - min_seqs
+
+# Plot Histogram 
+scaled_TotalSeqs_df %>%
+  ggplot(aes(x = TotalSeqs)) + 
+  geom_histogram(bins = 50) + 
+  scale_x_continuous(limits = c(0, 100000)) + 
+  labs(title = "Scaled Sequencing Depth") + 
+  theme_classic()
+
+#subset physeq obj by each breed for later ordination plots 
+poodle_physeq <- subset_samples(scaled_rooted_physeq, breed == "poodle")
+laborador_physeq <-subset_samples(scaled_rooted_physeq, breed == "laborador")
+health_physeq <- subset_samples(scaled_rooted_physeq, health == "healthy")
+```
+- It looks like all samples successfully normalized to the lowest read depth which is about 55,000.
+
+# Cacluate & Visualize community dissimilarity 
+
+## PCoA 
+
+### Sorensen
+```{r sorensen-PCoA}
+# Calculate sorensen dissimilarity: Abundance-unweighted of shared taxa
+scaled_soren_pcoa <-  
+  ordinate(
+    physeq = scaled_rooted_physeq,
+    method = "PCoA",
+    distance = "bray", binary = TRUE)
+
+health_scaled_soren_pcoa <-  
+  ordinate(
+    physeq = health_physeq,
+    method = "PCoA",
+    distance = "bray", binary = TRUE)
+
+#str(scaled_soren_pcoa)
+
+# Plot the ordination for all samples
+soren_all_pcoa <- plot_ordination(
+  physeq = scaled_rooted_physeq,
+  ordination = scaled_soren_pcoa,
+  color = "type",
+  shape = "type",
+  title = "Sorensen PCoA") +
+  geom_point(size=5, alpha = 0.5, aes(color = type)) +
+  scale_shape_manual(values = c(15,16,17,18, 19, 20)) +
+  scale_color_manual(values = all_samples_colors) + 
+  theme_bw()
+# Show the plot 
+soren_all_pcoa
+
+# straify by health status 
+soren_health_pcoa <- plot_ordination(
+  physeq = health_physeq,
+  ordination = health_scaled_soren_pcoa,
+  color = "type",
+  shape = "type",
+  title = "Health Status Sorensen PCoA") +
+  geom_point(size=5, alpha = 0.5, aes(color = type)) +
+  scale_shape_manual(values = c(15,16,17,18, 19, 20)) +
+  scale_color_manual(values = health_colors) + 
+  theme_bw()
+# Show the plot 
+soren_health_pcoa
+```
+**Interpretation**: For the Sorensen PCoA plot, 12.9% of variation is explained by Axis 1 and 9.1% of variation is explained by Axis 2. In total, 22% of variation is explained by the Sorensen statistic. There is not any clear clustering of certain characteristics. The Sorensen metric is unweighted and uses a binary variable to indicate the presence and absence of a taxa. This is consistent with findings from Bai et al, 2023.
+
+For the sorensen plot that displays the ordinance of health status, axis 1 explains 17.7% of variation and axis 2 explains 11.3% of the variation. In total, the Sorensen metric explains 29% of variation between the two breeds of healthy dogs. There seems to be more of a clear separation between healthy Labradors and healthy poodles. This is consistent with the findings of Bai et al, 2023
+
+```{r sorsen-plots-breeds}
+poodle_scaled_soren_pcoa <-  
+  ordinate(
+    physeq = poodle_physeq,
+    method = "PCoA",
+    distance = "bray", binary = TRUE)
+
+laborador_scaled_soren_pcoa <-  
+  ordinate(
+    physeq = laborador_physeq,
+    method = "PCoA",
+    distance = "bray", binary = TRUE)
+
+# Poodle sorensen plots 
+soren_poodle_pcoa <- plot_ordination(
+  physeq = poodle_physeq,
+  ordination = poodle_scaled_soren_pcoa,
+  color = "type",
+  shape = "type",
+  title = "Poodle Sorensen PCoA") +
+  geom_point(size=5, alpha = 0.5, aes(color = type)) +
+  scale_shape_manual(values = c(15,16,17,18, 19, 20)) +
+  scale_color_manual(values = poodle_colors) + 
+  theme_bw()
+# Show the plot 
+soren_poodle_pcoa
+
+# Labrador sorensen plots 
+soren_laborador_pcoa <- plot_ordination(
+  physeq = laborador_physeq,
+  ordination = laborador_scaled_soren_pcoa,
+  color = "type",
+  shape = "type",
+  title = "Laborador Sorensen PCoA") +
+  geom_point(size=5, alpha = 0.5, aes(color = type)) +
+  scale_shape_manual(values = c(15,16,17,18, 19, 20)) +
+  scale_color_manual(values = laborador_colors) + 
+  theme_bw()
+# Show the plot 
+soren_laborador_pcoa
+```
+
+For the Sorensen PCoA that compares the control and diarrhea samples from poodles, Axis 1 explains 19.4% of the variation, and axis 2 explains 11.2% of the variation. In total. 30.6% of variation is explained by the Sorensen metric for samples from Poodles. There seems to be somewhat separation between the control and diarrhea samples. This is consistent with the findings from Bai et al, 2023.
+
+For the Sorensen PCoA that compares the control and diarrhea samples from laboradors, Axis 1 explains 15.2% of the variation, and axis 2 explains 12.2% of the variation. In total. 27.4% of variation is explained by the Sorensen metric for samples from Poodles. There seems to be somewhat separation between the control and diarrhea samples. This is consistent with the findings from Bai et al, 2023.
+
+### Bray
+```{r bray-PCoA}
+# Calculate the BC distance
+scaled_BC_pcoa <- 
+  ordinate(
+    physeq = scaled_rooted_physeq,
+    method = "PCoA",
+    distance = "bray")
+
+health_scaled_BC_pcoa <- 
+  ordinate(
+    physeq = health_physeq,
+    method = "PCoA",
+    distance = "bray")
+
+poodle_scaled_BC_pcoa <-  
+  ordinate(
+    physeq = poodle_physeq,
+    method = "PCoA",
+    distance = "bray")
+
+laborador_scaled_BC_pcoa <-  
+  ordinate(
+    physeq = laborador_physeq,
+    method = "PCoA",
+    distance = "bray")
+
+# Plot the PCoA
+bray_health_pcoa <- plot_ordination(
+  physeq = health_physeq,
+  ordination = health_scaled_BC_pcoa,
+  color = "type",
+  shape = "type",
+  title = "Healthy Status Bray-Curtis PCoA") +
+  geom_point(size=5, alpha = 0.5, aes(color = type)) +
+  scale_shape_manual(values = c(15,16,17,18, 19, 20)) +
+  scale_color_manual(values = health_colors) + 
+  theme_bw() + stat_ellipse()
+# Show the plot 
+bray_health_pcoa
+
+
+bray_all_pcoa <- 
+  plot_ordination(
+    physeq = scaled_rooted_physeq,
+    ordination = scaled_BC_pcoa,
+    color = "type",
+    shape = "type",
+    title = "Bray-Curtis PCoA") +
+  geom_point(size=5, alpha = 0.5, aes(color = type)) +
+  scale_shape_manual(values = c(15,16,17,18, 19, 20)) +
+  scale_color_manual(values = c(all_samples_colors)) + 
+  theme_bw()
+bray_all_pcoa
+
+
+# Poodle BC plots 
+bray_poodle_pcoa <- plot_ordination(
+  physeq = poodle_physeq,
+  ordination = poodle_scaled_BC_pcoa,
+  color = "type",
+  shape = "type",
+  title = "Poodle Bray-Curtis PCoA") +
+  geom_point(size=5, alpha = 0.5, aes(color = type)) +
+  scale_shape_manual(values = c(15,16,17,18, 19, 20)) +
+  scale_color_manual(values = poodle_colors) + 
+  theme_bw() + stat_ellipse()
+# Show the plot 
+bray_poodle_pcoa
+
+# Laborador BC plots 
+bray_laborador_pcoa <- plot_ordination(
+  physeq = laborador_physeq,
+  ordination = laborador_scaled_BC_pcoa,
+  color = "type",
+  shape = "type",
+  title = "Laborador Bray-Curtis PCoA") +
+  geom_point(size=5, alpha = 0.5, aes(color = type)) +
+  scale_shape_manual(values = c(15,16,17,18, 19, 20)) +
+  scale_color_manual(values = laborador_colors) + 
+  theme_bw() + stat_ellipse()
+# Show the plot 
+bray_laborador_pcoa
+```
+
+
+**Interpretations:**
+The Bray-Curtis metric evaluates beta-diversity by weighted shared taxa by their abundance. For the plot comparing diversity between samples from healthy breeds, we see that Axis 1 explains 17.5% of variation, and Axis 2 explains 15.3% variation. Therefore, 32.8% variation is explained by this plot. There is some separation by breed.
+
+For the plot comparing diversity between all samples, we see that Axis 1 explains 16.7% of variation, and Axis 2 explains 11.7% variation. Therefore, 28.4% variation is explained by this plot. There is clustering by sample type.
+
+For the plot comparing diversity between poodle samples, we see that Axis 1 explains 20.8% of variation, and Axis 2 explains 16.8% variation. Therefore, 37.6% variation is explained by this plot. There is clustering by sample type.
+
+For the plot comparing diversity between laborador samples, we see that Axis 1 explains 19.1% of variation, and Axis 2 explains 16% variation. Therefore, 35.1% variation is explained by this plot. There is clustering by sample type.
+
+### Weighted Unifrac
+```{r wUnifrac-PCoA}
+# Calculate the BC distance
+scaled_wUNI_pcoa <- 
+  ordinate(
+    physeq = scaled_rooted_physeq,
+    method = "PCoA",
+    distance = "wunifrac")
+
+health_scaled_wUNI_pcoa <- 
+  ordinate(
+    physeq = health_physeq,
+    method = "PCoA",
+    distance = "wunifrac")
+
+poodle_scaled_wUNI_pcoa <- 
+  ordinate(
+    physeq = poodle_physeq,
+    method = "PCoA",
+    distance = "wunifrac")
+
+laborador_scaled_wUNI_pcoa <- 
+  ordinate(
+    physeq = laborador_physeq,
+    method = "PCoA",
+    distance = "wunifrac")
+
+# Plot the PCoA
+wUNI_all_pcoa <- 
+  plot_ordination(
+    physeq = scaled_rooted_physeq,
+    ordination = scaled_wUNI_pcoa,
+    color = "type",
+    shape = "type",
+    title = "Weighted Unifrac PCoA") +
+  geom_point(size=5, alpha = 0.5, aes(color = type)) +
+  scale_shape_manual(values = c(15,16,17,18, 19, 20)) +
+  scale_color_manual(values = c(all_samples_colors)) + 
+  theme_bw()
+wUNI_all_pcoa
+
+wUNI_health_pcoa <- plot_ordination(
+  physeq = health_physeq,
+  ordination = health_scaled_wUNI_pcoa,
+  color = "type",
+  shape = "type",
+  title = "Healthy Dogs Weighted Unifrac PCoA") +
+  geom_point(size=5, alpha = 0.5, aes(color = type)) +
+  scale_shape_manual(values = c(15,16,17,18, 19, 20)) +
+  scale_color_manual(values = health_colors) + 
+  theme_bw()
+# Show the plot 
+wUNI_health_pcoa
+
+wUNI_poodle_pcoa <- 
+  plot_ordination(
+    physeq = poodle_physeq,
+    ordination = poodle_scaled_wUNI_pcoa,
+    color = "type",
+    shape = "type",
+    title = "Poodle Weighted Unifrac PCoA") +
+  geom_point(size=5, alpha = 0.5, aes(color = type)) +
+  scale_shape_manual(values = c(15,16,17,18, 19, 20)) +
+  scale_color_manual(values = c(poodle_colors)) + 
+  theme_bw()
+wUNI_poodle_pcoa
+
+wUNI_laborador_pcoa <- 
+  plot_ordination(
+    physeq = laborador_physeq,
+    ordination = laborador_scaled_wUNI_pcoa,
+    color = "type",
+    shape = "type",
+    title = "Laborador Weighted Unifrac PCoA") +
+  geom_point(size=5, alpha = 0.5, aes(color = type)) +
+  scale_shape_manual(values = c(15,16,17,18, 19, 20)) +
+  scale_color_manual(values = c(laborador_colors)) + 
+  theme_bw()
+wUNI_laborador_pcoa
+```
+
+In plot comparing beta diversity between all samples, Axis 1 explains 28% of variation, and Axis 2 explains 22.3% of variation. In total, 50.3% of variation is explained in this plot. This is the highest amount of variation that is explained thus far.There seems more separation due to sample and breed type.
+
+In plot comparing beta diversity between all control samples, Axis 1 explains 32.7% of variation, and Axis 2 explains 16% of variation. In total, 48.7% of variation is explained in this plot. There seems to be clustering by sample type.
+
+In plot comparing beta diversity between all poodle samples, Axis 1 explains 35.7% of variation, and Axis 2 explains 20.2% of variation. In total, 55.9% of variation is explained in this plot. This is the highest amount of variation that is explained thus far.
+
+In plot comparing beta diversity between all laborador samples, Axis 1 explains 29.3% of variation, and Axis 2 explains 25.1% of variation. In total, 54.4% of variation is explained in this plot.There seems to be clustering by sample type.
+
+## Combine PCoAs
+ 
+```{r pcoa-together, fig.width=8, fig.height=3.5}
+(soren_all_pcoa + theme(legend.position = "none")) + 
+  (bray_all_pcoa + theme(legend.position = "none")) + 
+    (wUNI_all_pcoa + theme(legend.position = "none"))
+
+(soren_health_pcoa + theme(legend.position = "none")) + 
+  (bray_health_pcoa + theme(legend.position = "none")) + 
+    (wUNI_health_pcoa + theme(legend.position = "none"))
+
+(soren_poodle_pcoa + theme(legend.position = "none")) + 
+  (bray_poodle_pcoa + theme(legend.position = "none")) + 
+    (wUNI_poodle_pcoa + theme(legend.position = "none"))
+
+(soren_laborador_pcoa + theme(legend.position = "none")) + 
+  (bray_laborador_pcoa + theme(legend.position = "none")) + 
+    (wUNI_laborador_pcoa + theme(legend.position = "none"))
+```
+
+## NMDS 
+
+### Weighted Unifrac
+
+```{r wUnifrac-NMDS}
+# Calculate the Weighted Unifrac distance
+scaled_wUNI_nmds <- 
+  ordinate(
+    physeq = scaled_rooted_physeq,
+    method = "NMDS",
+    distance = "wunifrac")
+
+health_scaled_wUNI_nmds <- 
+  ordinate(
+    physeq = health_physeq,
+    method = "NMDS",
+    distance = "wunifrac")
+
+poodle_scaled_wUNI_nmds <- 
+  ordinate(
+    physeq = poodle_physeq,
+    method = "NMDS",
+    distance = "wunifrac")
+
+laborador_scaled_wUNI_nmds <- 
+  ordinate(
+    physeq = laborador_physeq,
+    method = "NMDS",
+    distance = "wunifrac")
+
+# Plot the PCoA
+wUNI_all_nmds <- 
+  plot_ordination(
+    physeq = scaled_rooted_physeq,
+    ordination = scaled_wUNI_nmds,
+    color = "type",
+    shape = "type",
+    title = "Weighted Unifrac NMDS") +
+  geom_point(size=5, alpha = 0.5, aes(color = type)) +
+  scale_shape_manual(values = c(15,16,17,18, 19, 20)) +
+  scale_color_manual(values = c(all_samples_colors)) + 
+  theme_bw()
+wUNI_all_nmds
+
+wUNI_health_nmds <- 
+  plot_ordination(
+    physeq = health_physeq,
+    ordination = health_scaled_wUNI_nmds,
+    color = "type",
+    shape = "type",
+    title = "Healthy Dogs Weighted Unifrac NMDS") +
+  geom_point(size=5, alpha = 0.5, aes(color = type)) +
+  scale_shape_manual(values = c(15,16,17,18, 19, 20)) +
+  scale_color_manual(values = c(health_colors)) + 
+  theme_bw()
+wUNI_all_nmds
+
+wUNI_poodle_nmds <- 
+  plot_ordination(
+    physeq = poodle_physeq,
+    ordination = poodle_scaled_wUNI_nmds,
+    color = "type",
+    shape = "type",
+    title = "Poodle Weighted Unifrac NMDS") +
+  geom_point(size=5, alpha = 0.5, aes(color = type)) +
+  scale_shape_manual(values = c(15,16,17,18, 19, 20)) +
+  scale_color_manual(values = c(poodle_colors)) + 
+  theme_bw()
+wUNI_poodle_nmds
+
+wUNI_laborador_nmds <- 
+  plot_ordination(
+    physeq = laborador_physeq,
+    ordination = laborador_scaled_wUNI_nmds,
+    color = "type",
+    shape = "type",
+    title = "Laborador Weighted Unifrac NMDS") +
+  geom_point(size=5, alpha = 0.5, aes(color = type)) +
+  scale_shape_manual(values = c(15,16,17,18, 19, 20)) +
+  scale_color_manual(values = c(laborador_colors)) + 
+  theme_bw()
+wUNI_laborador_nmds
+```
+
+The stress value is 0.18, 0.14, 0.13, 0.20 for all samples, samples from healthy dogs, samples from poodles, and samples from laboradors, respectively. All stress values are equal to or less than 0.20, which *may* be acceptable. Only two of the stress values (healthy samples and poodle samples) are less than 0.15.
+
+
+```{r combined-wUnifrac, fig.width=6, fig.height=3.5}
+(wUNI_all_pcoa + theme(legend.position = "none")) + 
+  (wUNI_all_nmds + theme(legend.position = "none"))
+
+(wUNI_health_pcoa + theme(legend.position = "none")) + 
+  (wUNI_health_nmds + theme(legend.position = "none"))
+
+(wUNI_poodle_pcoa + theme(legend.position = "none")) + 
+  (wUNI_poodle_nmds + theme(legend.position = "none"))
+
+(wUNI_laborador_pcoa + theme(legend.position = "none")) + 
+  (wUNI_laborador_nmds + theme(legend.position = "none"))
+```
+
+# Statistical Significance Testing 
+
+## PERMANOVA : all samples
+```{r PERMANOVA_all}
+scaled_sorensen_dist <- phyloseq::distance(scaled_rooted_physeq, method = "bray", binary = TRUE)
+scaled_bray_dist <- phyloseq::distance(scaled_rooted_physeq, method = "bray")
+scaled_wUnifrac_dist <- phyloseq::distance(scaled_rooted_physeq, method = "wunifrac")
+
+metadata <- data.frame(sample_data(scaled_rooted_physeq))
+ 
+adonis2(scaled_sorensen_dist ~ type, data = metadata)
+adonis2(scaled_bray_dist ~ type, data = metadata)
+adonis2(scaled_wUnifrac_dist ~ type, data = metadata)
+```
+**Interpretation**: The sample type is a significant variable for all of the beta diversity metrics. The Bray Curtis metric has the highest F-statistic (F = 2.41) for sample type. However, the Bray-Curtis and the weighted UniFrac have similar R2 values (~0.16), therefore these two metrics explain similar amounts of the data.
+
+## PERMANOVA: healthy Poodles vs healthy Laboradors 
+```{r PERMANOVA_healthy}
+health_scaled_sorensen_dist <- phyloseq::distance(health_physeq, method = "bray", binary = TRUE)
+health_scaled_bray_dist <- phyloseq::distance(health_physeq, method = "bray")
+health_scaled_wUnifrac_dist <- phyloseq::distance(health_physeq, method = "wunifrac")
+
+health_metadata <- data.frame(sample_data(health_physeq))
+
+adonis2(health_scaled_sorensen_dist ~ type, data = health_metadata)
+adonis2(health_scaled_bray_dist ~ type, data = health_metadata)
+adonis2(health_scaled_wUnifrac_dist ~ type, data = health_metadata)
+```
+**Interpretation:** The "type" variable has a p-value is less than 0.05 for all diversity metrics. This means that the healthy and control sample types have significantly different centroids. The weighted Unifrac has the highest R2 value (explains the most difference) and the highest F-statistic (F = 2.5) for the sample type variable.
+
+## PERMANOVA: poodles
+```{r PERMANOVA_poodles}
+# Calculate all three of the distance matrices
+poodle_scaled_sorensen_dist <- phyloseq::distance(poodle_physeq, method = "bray", binary = TRUE)
+poodle_scaled_bray_dist <- phyloseq::distance(poodle_physeq, method = "bray")
+poodle_scaled_wUnifrac_dist <- phyloseq::distance(poodle_physeq, method = "wunifrac")
+
+poodle_metadata <- data.frame(sample_data(poodle_physeq))
+
+adonis2(poodle_scaled_sorensen_dist ~ type, data = poodle_metadata)
+adonis2(poodle_scaled_bray_dist ~ type, data = poodle_metadata)
+adonis2(poodle_scaled_wUnifrac_dist ~ type, data = poodle_metadata)
+```
+
+**Interpretation:** The sorensen metric has the highest F-statistic (F = 1.66), R2 value (R = 0.098), and the only signficant p-value for sample (p = 0.02). Not much variation is explained by the beta diversity metrics for the poodle samples.
+
+## PERMANOVA: laboradors 
+```{r PERMANOVA_laboradors}
+# Calculate all three of the distance matrices
+laborador_scaled_sorensen_dist <- phyloseq::distance(laborador_physeq, method = "bray", binary = TRUE)
+laborador_scaled_bray_dist <- phyloseq::distance(laborador_physeq, method = "bray")
+laborador_scaled_wUnifrac_dist <- phyloseq::distance(laborador_physeq, method = "wunifrac")
+
+
+laborador_metadata <- data.frame(sample_data(laborador_physeq))
+
+
+adonis2(laborador_scaled_sorensen_dist ~ type, data = laborador_metadata)
+adonis2(laborador_scaled_bray_dist ~ type, data = laborador_metadata)
+adonis2(laborador_scaled_wUnifrac_dist ~ type, data = laborador_metadata)
+```
+
+**Interpretation**: For the Labrador samples, none of the beta diversity metrics indicate sample type (control vs diarrhea) as having signficant differences in the centroid of the data. Additionally, all of the R2 values are less than 10% and the all F-statistics for sample type are less than 1.5.
+
+## BetaDispR
+
+The PERMANOVA is sensitive to variance/dispersion in the data. Therefore, we need to run a homogeneity of dispersion test to test for the sensitivity of our PERMANOVA results to variance. 
+```{r betadispR_soren}
+# Homogeneity of Disperson test with beta dispr
+# Sorensen 
+beta_soren_all <- betadisper(scaled_sorensen_dist, metadata$type)
+permutest(beta_soren_all)
+
+beta_soren_health <- betadisper(health_scaled_sorensen_dist, health_metadata$type)
+permutest(beta_soren_health)
+
+beta_soren_poodle <- betadisper(poodle_scaled_sorensen_dist, poodle_metadata$type)
+permutest(beta_soren_poodle)
+
+beta_soren_laborador <- betadisper(laborador_scaled_sorensen_dist, laborador_metadata$type)
+permutest(beta_soren_laborador)
+```
+**Interpretation**: Because all of the p-values are greater than 0.05 for all sample sorensen, poodle sample sorensen, and Labrador sample sorensen, we can conclude that sample_type is senstive to dispersion. However, this conclusion is opposite for the healthy dogs dispersion
+
+```{r betadispR_BC}
+# Bray-Curtis 
+beta_bray_all <- betadisper(scaled_bray_dist, metadata$type)
+permutest(beta_bray_all)
+
+beta_bray_health <- betadisper(health_scaled_bray_dist, health_metadata$type)
+permutest(beta_bray_health)
+
+beta_bray_poodle <- betadisper(poodle_scaled_bray_dist, poodle_metadata$type)
+permutest(beta_bray_poodle)
+
+beta_bray_laborador <- betadisper(laborador_scaled_bray_dist, laborador_metadata$type)
+permutest(beta_bray_laborador)
+```
+
+**Interpretation:** The sample type variable is not signficantly impacted by dispersion for the all samples BC, the healthy dogs BC, and the poodles BC. However, sample type is sensitive to dispersion for the laborador BC.
+
+```{r betadispR_wUNi}
+# Weighted Unifrac 
+beta_wUNi_all <- betadisper(scaled_wUnifrac_dist, metadata$type)
+permutest(beta_wUNi_all)
+
+beta_wUNi_health <- betadisper(health_scaled_wUnifrac_dist, health_metadata$type)
+permutest(beta_wUNi_health)
+
+beta_wUNi_poodle <- betadisper(poodle_scaled_wUnifrac_dist, poodle_metadata$type)
+permutest(beta_wUNi_poodle)
+
+beta_wUNi_laborador <- betadisper(laborador_scaled_wUnifrac_dist, laborador_metadata$type)
+permutest(beta_wUNi_laborador)
+```
+**Interpretation:** The weighted unifracs for all samples and for Labrador samples are significantly impacted by data dispersion. However, the poodle and Labrador weighted unifracs are not significantly impacted by dispersion.
+
+# Taxonomic 
+```{r tax_colors}
+# Set the phylum colors
+phylum_colors <- c(
+  Acidobacteriota = "navy", 
+  Actinobacteriota = "darkslategray2", 
+  Armatimonadota = "deeppink1",
+  Alphaproteobacteria = "plum2", 
+  Bacteroidota = "gold", 
+  Betaproteobacteria = "plum1", 
+  Bdellovibrionota = "red1",
+  Chloroflexi="black", 
+  Crenarchaeota = "firebrick",
+  Cyanobacteria = "limegreen",
+  Deltaproteobacteria = "grey", 
+  Desulfobacterota="magenta",
+  Firmicutes = "#3E9B96",
+  Gammaproteobacteria = "greenyellow",
+  Myxococcota = "#B5D6AA",
+  Nitrospirota = "palevioletred1",
+  Proteobacteria = "royalblue",
+  Planctomycetota = "darkorange", 
+  Proteobacteria_unclassified = "greenyellow",
+  Thermoplasmatota = "green",
+  Verrucomicrobiota = "darkorchid1",
+  Other = "grey")
+```
+
+
+```{r tax_stacked_bargraphs}
+# Calculate the phylum relative abundance 
+# Note: The read depth MUST be normalized in some way: scale_reads
+phylum_df <- 
+  scaled_rooted_physeq %>%
+  # agglomerate at the phylum level 
+  tax_glom(taxrank = "Phylum") %>% 
+  # Transform counts to relative abundance 
+  transform_sample_counts(function (x) {x/sum(x)}) %>%
+  # Melt to a long format 
+  psmelt() %>%
+  # Filter out Phyla that are <1% - get rid of low abundant Phyla
+  dplyr::filter(Abundance > 0.00) %>%
+  # fix the order of date
+  mutate(type = fct_relevel(type, c("l-diarrhea", "l-control",
+                                          "p-diarrhea", "p-control")))
+
+# Stacked Bar Plot With All phyla 
+# Plot Phylum Abundances - make sure to load phylum_colors 
+phylum_df %>%
+  # Warning: It's important to have one sample per x value, 
+  # otherwise, it will take the sum between multiple samples
+  ggplot(aes(x = type, y = Abundance, fill = Phylum)) + 
+  geom_bar(stat = "identity", position = "fill") + 
+  labs(title = "Sample type Phylum Composition") + 
+  scale_fill_manual(values = phylum_colors) + 
+  theme_bw() + 
+  theme(axis.text.x = element_text(angle = 30, hjust = 1, vjust = 1))
+```
+
+```{r subset_phyla_boxplots}
+# Narrow in on a specific group
+phylum_df %>%
+  dplyr::filter(Phylum == "Proteobacteria") %>%
+  # build the plot 
+  ggplot(aes(x = type, y = Abundance, 
+             fill = type, color = type)) + 
+  geom_boxplot(alpha = 0.5, outlier.shape = NA) + # outliers not plotted here in boxplot 
+  geom_jitter() + 
+  theme_bw() + 
+  labs(title = "Proteobacteria Phylum Abundance") + 
+  scale_color_manual(values = all_samples_colors) + 
+  scale_fill_manual(values = all_samples_colors) + 
+    theme(axis.text.x = element_text(angle = 30, hjust = 1, vjust = 1),
+          legend.position = "right")
+
+phylum_df %>%
+  dplyr::filter(Phylum == "Bacteroidota") %>%
+  # build the plot 
+  ggplot(aes(x = type, y = Abundance, 
+             fill = type, color = type)) + 
+  geom_boxplot(alpha = 0.5, outlier.shape = NA) + # outliers not plotted here in boxplot 
+  geom_jitter() + 
+  theme_bw() + 
+  labs(title = "Bacteroidota Phylum Abundance") + 
+  scale_color_manual(values = all_samples_colors) + 
+  scale_fill_manual(values = all_samples_colors) + 
+    theme(axis.text.x = element_text(angle = 30, hjust = 1, vjust = 1),
+          legend.position = "right")
+```
+
+# Family
+```{r family_boxplots }
+# Calculate the Family relative abundance 
+# Note: The read depth MUST be normalized in some way: scale_reads
+family_df <- 
+  scaled_rooted_physeq %>%
+  # agglomerate at the phylum level 
+  tax_glom(taxrank = "Family") %>% 
+  # Transform counts to relative abundance 
+  transform_sample_counts(function (x) {x/sum(x)}) %>%
+  # Melt to a long format 
+  psmelt() %>%
+  # Filter out Phyla that are <1% - get rid of low abundant Phyla
+  dplyr::filter(Abundance > 0.01)
+
+# Check family_df
+#str(family_df)
+
+# Plot family 
+# Bacteroidota Families 
+family_df %>%
+  dplyr::filter(Phylum == "Bacteroidota") %>%
+  # build the plot 
+  ggplot(aes(x = type, y = Abundance, 
+             fill = type, color = type)) + 
+  facet_wrap(.~Family, scales = "free_y", nrow = 1) + 
+  geom_boxplot(alpha = 0.5, outlier.shape = NA) + # outliers not plotted here in boxplot 
+  geom_jitter() + 
+  theme_bw() + 
+  labs(title = "Bacteroidota Family Abundance") + 
+  scale_color_manual(values = all_samples_colors) + 
+  scale_fill_manual(values = all_samples_colors) + 
+  theme(axis.text.x = element_text(angle = 30, hjust = 1, vjust = 1),
+        legend.position = "bottom")
+```
+
+# Genus
+```{r genus_boxplots}
+#Calculate the Family relative abundance 
+# Note: The read depth MUST be normalized in some way: scale_reads
+genus_df <- 
+  scaled_rooted_physeq %>%
+  # agglomerate at the phylum level 
+  tax_glom(taxrank = "Genus") %>% 
+  # Transform counts to relative abundance 
+  transform_sample_counts(function (x) {x/sum(x)}) %>%
+  # Melt to a long format 
+  psmelt() %>%
+  # Filter out Phyla that are <1% - get rid of low abundant Phyla
+  dplyr::filter(Abundance > 0.01) 
+
+# Bacteroidota
+# Plot genus 
+genus_df %>%
+  dplyr::filter(Phylum == "Bacteroidota") %>%
+  # build the plot 
+  ggplot(aes(x = type, y = Abundance, 
+             fill = type, color = type)) + 
+  facet_wrap(.~Genus, scales = "free_y", nrow = 1) + 
+  geom_boxplot(alpha = 0.5, outlier.shape = NA) + # outliers not plotted here in boxplot 
+  geom_jitter() + 
+  theme_bw() + 
+  labs(title = "Bacteroidota Genus Abundance") + 
+  scale_color_manual(values = all_samples_colors) + 
+  scale_fill_manual(values = all_samples_colors) + 
+  theme(axis.text.x = element_text(angle = 30, hjust = 1, vjust = 1),
+        legend.position = "bottom")
+```
+# Document conclusions 
+From this analysis, I found that many of the beta diversity metrics minimally aligns with the Bai et al. 2023 paper. Specifically, both my analysis and the Bai et. al. 2023 found that microbial diversity differed significantly between poodles and Labradors in the healthy cohort. However, Bai et al found significant differences in microbial communities in dogs with acute diarrhea and healthy dogs for both the Labrador and poodle cohorts. In my analysis, I did not find this same significant difference. Bai et al only used Bray-Curtis pcoa for beta diversity evaluation and wilcoxon rank sum test for statistical testing. This could explain why we have different results. 
+
+The stacked taxonomy plots were similar between my analysis and Bai et al. analysis. Both agree that Bacteroidota and Proteobacteria are common taxa in the samples. I choose to further investigate these two phylum because Bacteroidota is associated with normal/healthy gut flora, and Proteobacteria is more associated with infection. Based on the bar plots, it looks like there could be a difference in the mean number of these phyla in healthy versus diarrhea samples.
+
+# Session Information 
+```{r session_info}
+devtools::session_info()
+```
+

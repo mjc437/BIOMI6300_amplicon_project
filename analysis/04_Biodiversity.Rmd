@@ -1,0 +1,218 @@
+---
+title: "Biodiversity Analysis"
+author: "Maya Craig"
+date: "`r Sys.Date()`"
+output:
+  html_document: 
+    code_folding: show
+    theme: spacelab
+    highlight: pygments
+    keep_md: no
+    toc: yes
+    toc_float:
+      collapsed: no
+      smooth_scroll: yes
+      toc_depth: 3
+  keep_md: true  
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      fig.path = "../figures/04_Biodiversity/",
+                      fig.align = "center")
+```
+
+# Set environment 
+
+## Set seed 
+```{r set-seed}
+set.seed(98572)
+```
+
+## Load Packages 
+```{r load-packages}
+pacman::p_load(tidyverse, devtools, patchwork, iNEXT, phyloseq,
+               install = FALSE)
+```
+
+## Load data 
+```{r load-data}
+load("data/02_PreProcessing/raw_physeq.RData")
+raw_physeq
+
+#check 
+min(sample_sums(raw_physeq))
+
+# Make metadata dataframe
+metadata_df <-
+  raw_physeq %>%
+  sample_data() %>%
+  data.frame()
+
+head(metadata_df)
+
+# set colors for breeds 
+breed_colors <- c(
+  "p-diarrhea" = "deeppink",
+  "p-control" = "royalblue1",
+  "l-control" = "goldenrod1",
+  "l-diarrhea" = "springgreen")
+```
+
+
+# Goals
+
+1. Calculate the Hill Diversity of the samples. 
+2. Evaluate the rarefaction curves. 
+3. Evaluate the Diversity values. 
+4. Makes notes of specific samples and their seq depth.
+
+# Diversity Calculations with iNEXT 
+
+```{r alpha-diversity-calcs}
+iNEXT_input_df <- 
+  raw_physeq %>%
+  otu_table() %>%
+  data.frame()
+#check
+dim(iNEXT_input_df)
+
+#iNEXT_data <- iNEXT(iNEXT_input_df, 
+#                    q = c(0,1,2), datatype = "abundance")
+
+# Save the file
+#save(iNEXT_data, file = "04_Biodiversity/iNEXT_data.RData")
+```
+
+# Evaluate Diversity 
+
+```{r eval-alpha-diversity}
+load("data/04_Biodiversity/iNEXT_data.RData")
+str(iNEXT_data)
+
+typeof(iNEXT_data)
+```
+
+# Plot diversity
+
+```{r rarefaction-plot}
+color_df <- 
+  iNEXT_input_df %>%
+  colnames() %>%
+  data.frame()
+# Check
+head(color_df)
+
+# Rename the column 
+colnames(color_df)[1] <- "names"
+# Check
+head(color_df)
+
+# make df to include colors
+iNEXT_color_df <- 
+  color_df %>%
+  # Merge with metadata
+  left_join(metadata_df, by = "names") %>%
+  # Merge with colors for plotting with ggiNEXT
+  left_join(data.frame(breed_colors = breed_colors,
+            type = names(breed_colors)),
+            by = "type") 
+```
+
+# Plot diversity with ggiNEXT
+
+```{r ggiNEXT-plot}
+ggiNEXT(iNEXT_data, type = 1, facet.var = "Order.q") + 
+  facet_wrap(~Order.q, scales = "fixed") + 
+  scale_color_manual(values = iNEXT_color_df$breed_colors, guide = FALSE) + 
+  scale_fill_manual(values = iNEXT_color_df$breed_colors, guide = FALSE) + 
+  scale_shape_manual(values = base::rep(17, nsamples(raw_physeq)),
+                     guide = FALSE) +
+  labs(x = "Number of Sequences (Library Size)", 
+       y = "Effective Number of ASVs") + 
+  theme_bw() + 
+  theme(legend.position = "none") 
+```
+
+**Observations/Interpretations::** 
+1. The number of ASVs plateaus as the library size increases.
+2. Sequencing depth appears to be pretty even across samples.
+3. There seems to be a difference in richness (q = 0) for the different dog breeds. Labradors with diarrhea (green) have more richness in comparison to the other groups.
+4. The common taxa (q = 1) and dominant taxa (q = 2) are pretty similar across the two different dog breeds. Also, a smaller library size is sufficient for these two diversity measurements.
+
+# Manually plot diversity 
+
+## Rarefaction
+
+```{r manual-iNEXT-plot}
+iNEXT_manual_df <- 
+  iNEXT_data$iNextEst$size_based %>%
+  dplyr::rename(names = Assemblage) %>%
+  # join with metadata 
+  left_join(., metadata_df, by = "names") %>%
+  # Add colors to data frame
+  left_join(data.frame(breed_colors = breed_colors,
+            type = names(breed_colors)),
+            by = "type") 
+# Inspect 
+dim(iNEXT_manual_df)
+
+# Plot it - Rarefaction Curve 
+iNEXT_manual_df %>%
+  # Filter out rows that are calculated by rarefaction from iNEXT
+  dplyr::filter(Method == "Rarefaction") %>%
+  # Now, let's draw the plot, be sure to group by the samples if using geom_line!
+  ggplot(aes(x = m, y= qD, color = type, group = names)) + 
+  geom_line() + 
+  # Facet with the station to see the samples better 
+  facet_grid(Order.q~type, scales = "free") + 
+  scale_color_manual(values = breed_colors) + 
+  labs(x = "Number of Sequences (Library Size)", 
+       y = "Effective Number of ASVs") + 
+  theme_bw() + 
+  #guides(color = guide_legend(nrow = 2, byrow = TRUE)) + 
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle = 30, vjust = 1, hjust = 1),
+        legend.title = element_blank())
+```
+
+**Observations/Interpretation of results:**
+1. In general, laboradors with diarrhea have a higher richness (q = 0) in comparison to the healthy poodles/control dogs. However, both the healthy and diarrhea Labradors have a higher richness than the healthy and diarrhea Poodles.
+2. The diarrhea Labradors have the highest amount of common taxa (q = 1). Diarrhea Poodles have the lowest amount of common taxa. 
+3. The diarrhea Labradors have the highest dominant taxa (q = 2), with the number of effective ASVs ranging from ~25-125. The number of dominant taxa among samples from Poodles are similar, ranging from about 25-75 effective ASVs. 
+4.  It looks like breed is more of an indicator for diversity than diarrhea vs. healthy sample types.
+
+# Boxplots of Diversity 
+
+```{r div-boxplots}
+# Box plots by breed and sample type
+iNEXT_manual_df %>%
+  ggplot(aes(x = type, y = qD, fill = type, color = type)) + 
+  facet_wrap(~Order.q, scales = "free") + 
+  geom_jitter(size = 2.5) + 
+  geom_boxplot(alpha = 0.5, outlier.shape = NA) + 
+  scale_color_manual(values = breed_colors) + 
+  scale_fill_manual(values = breed_colors) + 
+  labs(y = "Effective Number of ASVs") + 
+  theme_bw() +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle = 30, vjust = 0.8, hjust = 0.8),
+        axis.title.x = element_blank(),
+        legend.title = element_blank())
+```
+
+**Observations/Interpretations:** 
+1. There is a difference in richness between the two dog breeds. Labradors have a higher richness than Poodles.
+2. Labradors have the highest range of both common and dominant taxa in comparison to both groups of Poodles.
+
+# Document interpretations
+The interpretations presented in this document seems to agree with Bai et al. conclusion that species richness, diversity, and evenness of the intestinal tract of dogs with acute diarrhea vs. seemingly healthy dogs.
+
+# Session Info 
+
+```{r}
+session_info()
+```
+
