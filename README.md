@@ -18,4 +18,5 @@ The main goals of this project is to:
   - 12 from Laboradors with acute diarrhea
 - All samples came from dogs that reside in China
 link to study: https://link.springer.com/article/10.1007/s00203-023-03439-6#Bib1
+Bioproject accession ID PRJNA917802
 primers used: 16S V4 region (515F and 806R), Johnson et al (https://doi.org/10.1038/s41467-019-13036-1)
